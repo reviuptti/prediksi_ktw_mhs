@@ -78,7 +78,8 @@ def load_data_from_github():
         
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
-            df = pd.read_csv(io.StringIO(response.content.decode('utf-8')), low_memory=False)
+            # Baca CSV dengan tipe data object dulu agar tidak error saat parsing awal
+            df = pd.read_csv(io.StringIO(response.content.decode('utf-8')), low_memory=False, dtype=str)
             return df
         else:
             st.error(f"Gagal ambil data. Status: {response.status_code}")
@@ -88,29 +89,42 @@ def load_data_from_github():
         return pd.DataFrame()
 
 # ==========================================
-# 3. HELPER FUNCTIONS (DIPERBAIKI)
+# 3. HELPER FUNCTIONS (FIXED)
 # ==========================================
+
+def clean_and_convert_numeric(df, cols):
+    """
+    Fungsi pembantu untuk memaksa kolom menjadi angka float.
+    Nilai error/string akan diubah jadi 0.0
+    """
+    subset = df[cols].copy()
+    # 1. Ganti koma dengan titik (jika format Indonesia)
+    subset = subset.apply(lambda x: x.str.replace(',', '.', regex=False) if x.dtype == "object" else x)
+    # 2. Paksa ke numeric, error jadi NaN
+    subset = subset.apply(pd.to_numeric, errors='coerce')
+    # 3. Isi NaN dengan 0.0
+    return subset.fillna(0.0)
 
 def prepare_cnn_input(df_row):
     df = df_row.copy()
     
-    # 1. Handle Status Akademik (Categorical)
+    # --- 1. STATUS AKADEMIK (Tetap String -> Kategori) ---
     status_map = {'A': 0, 'C': 1, 'N': 2, 'K': 3,'0': 4}
     NUM_CLASSES_STATUS = 5
     
     status_matrix = []
     for col in CNN_CONFIG['status_akademik_cols']:
         if col not in df.columns: df[col] = '0'
-        # Pastikan convert ke string dulu sebelum upper()
+        # Pastikan string bersih
         val = str(df[col].iloc[0]).upper().strip()
-        val = val if val != 'NONE' and val != 'NAN' else '0'
+        val = val if val not in ['NONE', 'NAN', ''] else '0'
         mapped_val = status_map.get(val, 3)
         status_matrix.append(mapped_val)
     
     status_matrix = np.array([status_matrix]) 
     X_status_seq = to_categorical(status_matrix, num_classes=NUM_CLASSES_STATUS)
 
-    # 2. Handle Numeric Data (FIX CRASH DISINI)
+    # --- 2. DATA NUMERIK (IPK, IPS, UKT, DLL) ---
     group_mapping = {
         'ipk': CNN_CONFIG['ipk_cols'],
         'ips': CNN_CONFIG['ips_cols'],
@@ -122,34 +136,54 @@ def prepare_cnn_input(df_row):
     
     data_arrays = []
     for key, cols in group_mapping.items():
-        # [SOLUSI] Paksa convert ke numeric, error jadi NaN, lalu isi 0.0
-        # Ini mencegah string masuk ke scaler.transform
-        vals = df[cols].apply(pd.to_numeric, errors='coerce').fillna(0.0).values
+        # [SOLUSI UTAMA] Bersihkan data sebelum masuk Scaler
+        cleaned_data = clean_and_convert_numeric(df, cols)
+        vals = cleaned_data.values
         
-        # Transform menggunakan scaler yang sudah diload
+        # Transform
         scaled_vals = scaler_seq[key].transform(vals)
         data_arrays.append(scaled_vals)
     
-    # Gabungkan Numeric + Status
     X_numeric_seq = np.dstack(data_arrays).astype('float32')
     X_seq_final = np.concatenate([X_numeric_seq, X_status_seq], axis=2)
 
-    # 3. Handle Static Features
+    # --- 3. DATA STATIS (UMUR, DLL) ---
+    # Bersihkan fitur statis numerik
     for c in CNN_CONFIG['num_features']:
         if c not in df.columns: df[c] = 0
-        # Sama, paksa numeric untuk fitur statis juga
-        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+    
+    # Bersihkan kolom numerik statis di DF utama sebelum transform
+    df_cleaned = df.copy()
+    df_cleaned[CNN_CONFIG['num_features']] = clean_and_convert_numeric(df, CNN_CONFIG['num_features'])
         
-    X_static = prep_static.transform(df).astype('float32')
+    X_static = prep_static.transform(df_cleaned).astype('float32')
     return [X_seq_final, X_static]
 
 def prepare_mlp_input(df_row):
     try:
-        # Pipeline otomatis menghandle preprocessing, tapi kita perlu pastikan 
-        # tipe datanya tidak membuat pipeline bingung
-        return prep_pipeline.transform(df_row)
+        # Bersihkan data numerik sebelum masuk pipeline MLP juga
+        df_clean = df_row.copy()
+        
+        # List semua kolom numerik yang mungkin dipakai MLP
+        all_numeric_cols = CNN_CONFIG['num_features'] + \
+                           CNN_CONFIG['ipk_cols'] + CNN_CONFIG['ips_cols'] + \
+                           CNN_CONFIG['sks_smt_cols'] + CNN_CONFIG['sks_total_smt_cols']
+        
+        # Bersihkan
+        for col in all_numeric_cols:
+            if col in df_clean.columns:
+                 # Logic pembersihan manual per kolom
+                 val = str(df_clean[col].iloc[0])
+                 try:
+                     val = float(val)
+                 except:
+                     val = 0.0
+                 df_clean[col] = val
+                 
+        return prep_pipeline.transform(df_clean)
     except Exception as e:
-        st.warning(f"MLP Preprocessing Error: {e}")
+        # Silent fail agar aplikasi tidak crash total, kembalikan None
+        print(f"MLP Error: {e}")
         return None
 
 # ==========================================
@@ -171,8 +205,8 @@ with st.container():
     c1, c2 = st.columns([3, 1])
     with c1:
         if 'nim' in df_all.columns:
-            # Pastikan NIM dibaca sebagai string, hilangkan .0 jika ada
-            nims = df_all['nim'].dropna().astype(str).str.replace(r'\.0$', '', regex=True).unique().tolist()
+            # Pastikan NIM string bersih
+            nims = df_all['nim'].astype(str).str.split('.').str[0].unique().tolist()
             selected_nim = st.selectbox("Cari NIM:", options=nims, index=None, placeholder="Ketik atau pilih NIM...")
         else:
             st.error("Kolom 'nim' tidak ditemukan di CSV.")
@@ -185,8 +219,10 @@ with st.container():
 
 # --- C. PROSES & HASIL ---
 if btn_predict and selected_nim:
-    # Filter Data (Pastikan tipe data sama-sama string)
-    df = df_all[df_all['nim'].astype(str).str.replace(r'\.0$', '', regex=True) == selected_nim]
+    # Filter Data
+    # Normalisasi kolom NIM di dataframe agar cocok dengan input
+    df_all['nim_clean'] = df_all['nim'].astype(str).str.split('.').str[0]
+    df = df_all[df_all['nim_clean'] == selected_nim]
     
     if df.empty:
         st.error("Data NIM tidak ditemukan.")
@@ -231,18 +267,30 @@ if btn_predict and selected_nim:
         
         history_data = []
         for i in range(1, 9):
+            # Ambil data mentah
             ukt_val = row.get(f'nominal_ukt_{i}', 0)
             bea_val = row.get(f'status_beasiswa_{i}', 0)
             raw_status = row.get(f'kdstatusakademik_{i}', '-')
             
+            # Format Angka untuk Tampilan
+            try:
+                ukt_fmt = f"{float(str(ukt_val).replace(',','.')):,.0f}"
+            except:
+                ukt_fmt = "0"
+                
+            try:
+                bea_fmt = "Ya" if float(str(bea_val)) == 1 else "Tidak"
+            except:
+                bea_fmt = "Tidak"
+
             history_data.append({
                 "Smt": f"Smt {i}",
                 "SKS Smt": row.get(f'sks_smt_{i}', 0),
                 "Tot SKS": row.get(f'sks_total_smt_{i}', 0),
-                "IPS": f"{row.get(f'ips_{i}', 0.0):.2f}",
-                "IPK": f"{row.get(f'ipk_{i}', 0.0):.2f}",
-                "Bayar UKT": f"{int(ukt_val):,}" if pd.notnull(ukt_val) and str(ukt_val).replace('.','').isdigit() else "0",
-                "Beasiswa": "Ya" if bea_val == 1 else "Tidak",
+                "IPS": row.get(f'ips_{i}', 0),
+                "IPK": row.get(f'ipk_{i}', 0),
+                "Bayar UKT": ukt_fmt,
+                "Beasiswa": bea_fmt,
                 "Status Akademik": str(raw_status) 
             })
         
@@ -259,7 +307,10 @@ if btn_predict and selected_nim:
             
             # 2. MLP
             in_mlp = prepare_mlp_input(df)
-            prob_mlp = model_mlp.predict(in_mlp)[0][0] if in_mlp is not None else 0.0
+            if in_mlp is not None:
+                prob_mlp = model_mlp.predict(in_mlp)[0][0]
+            else:
+                prob_mlp = prob_cnn # Fallback jika MLP error
             
             # 3. Average
             avg_prob = (prob_cnn + prob_mlp) / 2
