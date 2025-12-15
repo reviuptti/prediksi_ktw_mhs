@@ -8,7 +8,7 @@ import io
 from tensorflow.keras.utils import to_categorical
 
 # ==========================================
-# 1. KONFIGURASI HALAMAN & CSS
+# 1. KONFIGURASI HALAMAN
 # ==========================================
 st.set_page_config(
     page_title="Sistem Prediksi Kelulusan",
@@ -16,24 +16,34 @@ st.set_page_config(
     layout="wide"
 )
 
+# Custom CSS untuk meniru style 'LabelFrame' dan Card
 st.markdown("""
     <style>
-    .metric-card {
-        background-color: #f0f2f6;
+    .info-box {
+        background-color: #f8f9fa;
+        border: 1px solid #dee2e6;
+        border-radius: 5px;
         padding: 15px;
-        border-radius: 10px;
-        border-left: 5px solid #007bff;
+        margin-bottom: 15px;
     }
-    .stAlert {
-        padding: 10px;
+    .info-label {
+        font-weight: bold;
+        color: #495057;
+        font-size: 0.9rem;
+    }
+    .info-value {
+        color: #212529;
+        font-size: 1rem;
+        margin-bottom: 8px;
     }
     </style>
     """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. LOAD ASSETS & CONFIG (CACHED)
+# 2. LOAD ASSETS (Sama seperti app_new.py)
 # ==========================================
 
+# Konfigurasi Kolom
 CNN_CONFIG = {
     'sks_total_smt_cols': [f'sks_total_smt_{i}' for i in range(1, 9)],
     'ipk_cols': [f'ipk_{i}' for i in range(1, 9)],
@@ -48,6 +58,7 @@ CNN_CONFIG = {
 
 @st.cache_resource
 def load_models_and_scalers():
+    """Load model sekali saja untuk performa"""
     try:
         m_cnn = tf.keras.models.load_model('model_cnn.h5')
         m_mlp = tf.keras.models.load_model('model_mlp.h5')
@@ -61,43 +72,26 @@ def load_models_and_scalers():
 
 model_cnn, model_mlp, scaler_seq, prep_static, prep_pipeline = load_models_and_scalers()
 
-# --- FUNGSI BARU: Ambil Data dari GitHub Private ---
-@st.cache_data(ttl=3600) # Cache data selama 1 jam agar tidak request terus menerus
+@st.cache_data(ttl=3600)
 def load_data_from_github():
-    """
-    Mengambil file CSV dari GitHub Private Repository menggunakan Token.
-    """
+    """Mengambil CSV dari Private Repo GitHub"""
     try:
-        # Mengambil config dari st.secrets
         url = st.secrets["github"]["csv_url"]
         token = st.secrets["github"]["token"]
+        headers = {"Authorization": f"token {token}"}
         
-        headers = {
-            "Authorization": f"token {token}"
-        }
-        
-        # Download file
         response = requests.get(url, headers=headers)
-        
         if response.status_code == 200:
-            # Konversi konten text CSV menjadi Pandas DataFrame
-            return pd.read_csv(io.StringIO(response.content.decode('utf-8')))
-        elif response.status_code == 404:
-            st.error("File CSV tidak ditemukan di URL tersebut. Cek URL di secrets.")
-            return pd.DataFrame()
-        elif response.status_code == 401:
-            st.error("Gagal Autentikasi. Cek GitHub Token di secrets.")
-            return pd.DataFrame()
+            return pd.read_csv(io.StringIO(response.content.decode('utf-8')), low_memory=False)
         else:
-            st.error(f"Gagal mengambil data. Error: {response.status_code}")
+            st.error(f"Gagal ambil data. Status: {response.status_code}")
             return pd.DataFrame()
-            
     except Exception as e:
-        st.error(f"Error System: {e}")
+        st.error(f"Error Koneksi Data: {e}")
         return pd.DataFrame()
 
 # ==========================================
-# 3. HELPER FUNCTIONS (PREPROCESSING)
+# 3. HELPER FUNCTIONS (Sama seperti app_new.py)
 # ==========================================
 
 def prepare_cnn_input(df_row):
@@ -149,124 +143,151 @@ def prepare_mlp_input(df_row):
         return None
 
 # ==========================================
-# 4. UI UTAMA
+# 4. UI UTAMA (Streamlit Implementation of app_new.py)
 # ==========================================
 
-st.title("🎓 Dashboard Prediksi Kelulusan (AI)")
-st.markdown("Sistem prediksi kelulusan mahasiswa tepat waktu menggunakan *Hybrid Deep Learning (CNN + MLP)*.")
+st.title("🎓 Sistem Prediksi Kelulusan Mahasiswa")
+st.markdown("Dashboard Prediksi Kelulusan (Deep Learning - Hybrid Model)")
 
-# --- Bagian Pencarian ---
+# --- A. LOAD DATA ---
+with st.spinner("Sedang memuat data dari Repository..."):
+    df_all = load_data_from_github()
+
+if df_all.empty:
+    st.stop() # Berhenti jika data gagal load
+
+# --- B. INPUT FRAME ---
 with st.container():
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        nim_input = st.text_input("Masukkan NIM Mahasiswa:", placeholder="Contoh: 18241010xxxx")
-    with col2:
-        st.write("") 
-        st.write("") 
-        search_btn = st.button("🔍 Analisa & Prediksi", type="primary", use_container_width=True)
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        # Mengambil list NIM untuk Selectbox
+        # Asumsi CSV punya kolom 'nim'. Filter out NaN
+        if 'nim' in df_all.columns:
+            nims = df_all['nim'].dropna().astype(str).unique().tolist()
+            selected_nim = st.selectbox("Cari NIM:", options=nims, index=None, placeholder="Ketik atau pilih NIM...")
+        else:
+            st.error("Kolom 'nim' tidak ditemukan di CSV.")
+            st.stop()
+            
+    with c2:
+        st.write("") # Spacer
+        st.write("")
+        btn_predict = st.button("🔍 ANALISA & PREDIKSI", type="primary", use_container_width=True)
 
-if search_btn and nim_input:
-    # 1. Load Semua Data dari GitHub (Cached)
-    with st.spinner('Mengunduh data terbaru dari server...'):
-        df_all = load_data_from_github()
+# --- C. PROSES & HASIL ---
+if btn_predict and selected_nim:
+    # Filter Data
+    df = df_all[df_all['nim'].astype(str) == selected_nim]
     
-    if not df_all.empty:
+    if df.empty:
+        st.error("Data NIM tidak ditemukan.")
+    else:
+        row = df.iloc[0] # Ambil baris pertama
+        
+        # --- D. DETAIL DATA FRAME (Meniru Grid Layout app_new.py) ---
+        st.divider()
+        st.subheader("📋 Parameter Fitur Mahasiswa")
+        
+        # Helper untuk menampilkan data aman
+        def get_val(col): return row.get(col, '-')
+        
+        with st.container(border=True):
+            # Baris 1
+            c1, c2, c3 = st.columns(3)
+            c1.markdown(f"<div class='info-label'>Fakultas</div><div class='info-value'>{get_val('kdfakultas')}</div>", unsafe_allow_html=True)
+            c2.markdown(f"<div class='info-label'>Prodi/Strata</div><div class='info-value'>{get_val('kdstratapendidikan')}</div>", unsafe_allow_html=True)
+            c3.markdown(f"<div class='info-label'>Gender</div><div class='info-value'>{get_val('kdjeniskelamin')}</div>", unsafe_allow_html=True)
+            
+            # Baris 2
+            c1, c2, c3 = st.columns(3)
+            c1.markdown(f"<div class='info-label'>Umur Masuk</div><div class='info-value'>{get_val('umur_saat_masuk')}</div>", unsafe_allow_html=True)
+            c2.markdown(f"<div class='info-label'>SKS Tempuh</div><div class='info-value'>{get_val('total_sks_saat_ini')}</div>", unsafe_allow_html=True)
+            c3.markdown(f"<div class='info-label'>IPK Akhir</div><div class='info-value'>{get_val('ipk_saat_ini')}</div>", unsafe_allow_html=True)
+            
+            # Baris 3
+            c1, c2, c3 = st.columns(3)
+            c1.markdown(f"<div class='info-label'>Status Saat Ini</div><div class='info-value'>{get_val('real_status_akademik_terakhir')}</div>", unsafe_allow_html=True)
+            c2.markdown(f"<div class='info-label'>Lama Studi (Smt)</div><div class='info-value'>{get_val('lama_studi_semester')}</div>", unsafe_allow_html=True)
+            c3.markdown(f"<div class='info-label'>Rata-rata SKS</div><div class='info-value'>{get_val('rata_rata_sks')}</div>", unsafe_allow_html=True)
+            
+            # Baris 4
+            c1, c2, c3 = st.columns(3)
+            c1.markdown(f"<div class='info-label'>Rata-rata IPS</div><div class='info-value'>{get_val('rata_rata_ips')}</div>", unsafe_allow_html=True)
+            c2.markdown(f"<div class='info-label'>Rata-rata IPK</div><div class='info-value'>{get_val('rata_rata_ipk')}</div>", unsafe_allow_html=True)
+            c3.markdown(f"<div class='info-label'>Tren IPK</div><div class='info-value'>{get_val('tren_ipk')}</div>", unsafe_allow_html=True)
+            
+            # Baris 5
+            c1, c2, c3 = st.columns(3)
+            c1.markdown(f"<div class='info-label'>StdDev IPS</div><div class='info-value'>{get_val('stddev_ips')}</div>", unsafe_allow_html=True)
+            c2.markdown(f"<div class='info-label'>Jumlah Smt Gagal</div><div class='info-value'>{get_val('jumlah_smt_gagal')}</div>", unsafe_allow_html=True)
+            c3.write("") # Spacer
+
+        # --- E. TABEL SEKUENSIAL ---
+        st.subheader("📊 Riwayat Akademik (Semester 1-8)")
+        
+        history_data = []
+        for i in range(1, 9):
+            ukt_val = row.get(f'nominal_ukt_{i}', 0)
+            bea_val = row.get(f'status_beasiswa_{i}', 0)
+            raw_status = row.get(f'kdstatusakademik_{i}', '-')
+            
+            history_data.append({
+                "Smt": f"Smt {i}",
+                "SKS Smt": row.get(f'sks_smt_{i}', 0),
+                "Tot SKS": row.get(f'sks_total_smt_{i}', 0),
+                "IPS": f"{row.get(f'ips_{i}', 0.0):.2f}",
+                "IPK": f"{row.get(f'ipk_{i}', 0.0):.2f}",
+                "Bayar UKT": f"{int(ukt_val):,}" if pd.notnull(ukt_val) else "0",
+                "Beasiswa": "Ya" if bea_val == 1 else "Tidak",
+                "Status Akademik": str(raw_status) if pd.notna(raw_status) else "-" # Force string
+            })
+        
+        st.dataframe(pd.DataFrame(history_data), use_container_width=True, hide_index=True)
+
+        # --- F. HASIL PREDIKSI (Result Frame) ---
+        st.divider()
+        st.subheader("🤖 Hasil Prediksi AI")
+        
         try:
-            # 2. Filter Data Berdasarkan NIM Input
-            # Pastikan kolom nim dibaca sebagai string untuk pencocokan
-            if 'nim' in df_all.columns:
-                df = df_all[df_all['nim'].astype(str) == str(nim_input)]
-            else:
-                st.error("Format CSV salah: Kolom 'nim' tidak ditemukan.")
-                df = pd.DataFrame()
-
-            if df.empty:
-                st.error(f"❌ Data NIM **{nim_input}** tidak ditemukan di data mahasiswa.")
-            else:
-                # --- PROSES UNTUK SATU MAHASISWA TERPILIH ---
-                st.divider()
-                st.subheader("📋 Profil Mahasiswa")
+            # 1. CNN
+            in_cnn = prepare_cnn_input(df)
+            prob_cnn = model_cnn.predict(in_cnn)[0][0]
+            
+            # 2. MLP
+            in_mlp = prepare_mlp_input(df)
+            prob_mlp = model_mlp.predict(in_mlp)[0][0] if in_mlp is not None else 0.0
+            
+            # 3. Average
+            avg_prob = (prob_cnn + prob_mlp) / 2
+            
+            # Visualisasi
+            c_cnn, c_mlp, c_final = st.columns(3)
+            
+            def get_style(prob):
+                txt = "TEPAT WAKTU" if prob > 0.5 else "TERLAMBAT"
+                col = "normal" if prob > 0.5 else "inverse" # Streamlit metric color logic
+                return txt, col
+            
+            with c_cnn:
+                lbl, col = get_style(prob_cnn)
+                st.metric("Model Hybrid (CNN)", f"{prob_cnn*100:.1f}%", lbl, delta_color=col)
                 
-                # Mengambil data baris pertama
-                row = df.iloc[0]
+            with c_mlp:
+                lbl, col = get_style(prob_mlp)
+                st.metric("Model Baseline (MLP)", f"{prob_mlp*100:.1f}%", lbl, delta_color=col)
+            
+            with c_final:
+                verdict = "LULUS TEPAT WAKTU" if avg_prob > 0.5 else "TERLAMBAT LULUS"
+                bg = "#d4edda" if avg_prob > 0.5 else "#f8d7da" # Green / Red bg
+                fg = "#155724" if avg_prob > 0.5 else "#721c24"
                 
-                c1, c2, c3, c4 = st.columns(4)
-                c1.markdown(f"**Fakultas**\n{row.get('kdfakultas', '-')}")
-                c2.markdown(f"**Prodi**\n{row.get('kdstratapendidikan', '-')}")
-                c3.markdown(f"**Jenis Kelamin**\n{row.get('kdjeniskelamin', '-')}")
-                c4.markdown(f"**Angkatan/Umur**\n{row.get('umur_saat_masuk', '-')}")
+                st.markdown(f"""
+                <div style="background-color: {bg}; color: {fg}; padding: 15px; border-radius: 8px; text-align: center; border: 1px solid {fg};">
+                    <h5 style="margin:0;">KESIMPULAN SISTEM</h5>
+                    <h3 style="margin:5px 0;">{verdict}</h3>
+                    <p style="margin:0; font-weight:bold;">Confidence: {avg_prob*100:.1f}%</p>
+                </div>
+                """, unsafe_allow_html=True)
                 
-                st.write("")
-                c1, c2, c3, c4 = st.columns(4)
-                c1.markdown(f"**IPK Akhir**\n{row.get('ipk_saat_ini', 0):.2f}")
-                c2.markdown(f"**Total SKS**\n{row.get('total_sks_saat_ini', 0)}")
-                c3.markdown(f"**Lama Studi**\n{row.get('lama_studi_semester', '-')}")
-                c4.markdown(f"**Status Terakhir**\n{row.get('real_status_akademik_terakhir', '-')}")
-
-                # --- Tabel Riwayat ---
-                st.subheader("📊 Riwayat Akademik (Semester 1-8)")
-                
-                history_data = []
-                for i in range(1, 9):
-                    ukt_val = row.get(f'nominal_ukt_{i}', 0)
-                    bea_val = row.get(f'status_beasiswa_{i}', 0)
-                    
-                    history_data.append({
-                        "Semester": f"Smt {i}",
-                        "SKS Smt": row.get(f'sks_smt_{i}', 0),
-                        "Total SKS": row.get(f'sks_total_smt_{i}', 0),
-                        "IPS": f"{row.get(f'ips_{i}', 0.0):.2f}",
-                        "IPK": f"{row.get(f'ipk_{i}', 0.0):.2f}",
-                        "UKT (Rp)": f"{int(ukt_val):,}" if pd.notnull(ukt_val) else "0",
-                        "Beasiswa": "Ya" if bea_val == 1 else "Tidak",
-                        "Status": row.get(f'kdstatusakademik_{i}', '-')
-                    })
-                
-                df_history = pd.DataFrame(history_data)
-                st.dataframe(df_history, use_container_width=True, hide_index=True)
-
-                # --- Proses Prediksi AI ---
-                st.divider()
-                st.subheader("🤖 Hasil Prediksi AI")
-
-                # Prediksi CNN
-                in_cnn = prepare_cnn_input(df)
-                prob_cnn = model_cnn.predict(in_cnn)[0][0]
-                
-                # Prediksi MLP
-                in_mlp = prepare_mlp_input(df)
-                prob_mlp = model_mlp.predict(in_mlp)[0][0] if in_mlp is not None else 0.0
-                
-                # Rata-rata (Ensemble)
-                avg_prob = (prob_cnn + prob_mlp) / 2
-                
-                col_cnn, col_mlp, col_final = st.columns(3)
-                
-                def get_status_style(prob):
-                    label = "TEPAT WAKTU" if prob > 0.5 else "TERLAMBAT"
-                    delta_color = "normal" if prob > 0.5 else "inverse"
-                    return label, delta_color
-
-                with col_cnn:
-                    lbl, color = get_status_style(prob_cnn)
-                    st.metric(label="Model Sequential (CNN)", value=f"{prob_cnn*100:.1f}%", delta=lbl, delta_color=color)
-                
-                with col_mlp:
-                    lbl, color = get_status_style(prob_mlp)
-                    st.metric(label="Model Tabular (MLP)", value=f"{prob_mlp*100:.1f}%", delta=lbl, delta_color=color)
-                
-                with col_final:
-                    verdict = "LULUS TEPAT WAKTU" if avg_prob > 0.5 else "TERLAMBAT LULUS"
-                    bg_color = "#d4edda" if avg_prob > 0.5 else "#f8d7da"
-                    text_color = "#155724" if avg_prob > 0.5 else "#721c24"
-                    
-                    st.markdown(f"""
-                    <div style="background-color: {bg_color}; color: {text_color}; padding: 10px; border-radius: 5px; text-align: center;">
-                        <h4 style="margin:0;">KESIMPULAN</h4>
-                        <h3 style="margin:0;">{verdict}</h3>
-                        <p style="margin:0;">Confidence: {avg_prob*100:.1f}%</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
         except Exception as e:
-            st.error(f"Terjadi Kesalahan Aplikasi: {str(e)}")
+            st.error(f"Terjadi kesalahan saat prediksi: {e}")
