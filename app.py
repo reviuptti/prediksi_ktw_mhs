@@ -153,7 +153,8 @@ if search_btn and nim_input:
             with st.spinner('Mengambil data dan melakukan prediksi...'):
                 # Query Database
                 query = f"SELECT * FROM dl.master_mhs WHERE reverse(nim) = '{nim_input}'"
-                df = pd.read_sql(query, engine)
+                #df = pd.read_sql(query, engine)
+                df = pd.read_csv("data_mahasiswa_dump.csv")
                 
                 if df.empty:
                     st.error(f"❌ Data NIM **{nim_input}** tidak ditemukan di database.")
