@@ -1,0 +1,7 @@
+streamlit
+pandas
+numpy
+tensorflow
+joblib
+sqlalchemy
+psycopg2-binary
