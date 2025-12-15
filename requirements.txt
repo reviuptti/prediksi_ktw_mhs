@@ -5,3 +5,4 @@ tensorflow
 joblib
 sqlalchemy
 psycopg2-binary
+scikit-learn
